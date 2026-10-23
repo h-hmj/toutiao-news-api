@@ -1,4 +1,3 @@
-from dns.e164 import query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, delete
 from models.favorite import Favorite
@@ -24,7 +23,8 @@ async def add_news_favorite(
 ):
     favorite = Favorite(user_id=user_id, news_id=news_id)
     db.add(favorite)
-    await db.commit()
+    # flush 立即发送 INSERT，重复收藏会在这里抛出 IntegrityError（唯一约束），由全局异常处理器转成 400
+    await db.flush()
     await db.refresh(favorite)
     return favorite
 
@@ -64,7 +64,6 @@ async def remove_news_favorite(
 ):
     stmt = delete(Favorite).where(Favorite.user_id == user_id, Favorite.news_id == news_id)
     result = await db.execute(stmt)
-    await db.commit()
     #若返回true则代表删除成功，若为false则代表删除失败
     return result.rowcount > 0
 
@@ -76,9 +75,8 @@ async def remove_all_favorites(
 ):
     stmt = delete(Favorite).where(Favorite.user_id == user_id)
     result = await db.execute(stmt)
-    await db.commit()
-    #返回删除的行数
-    return result.rowcount > 0
+    #返回删除的行数（而不是 bool，供路由拼接"清空了N条记录"消息）
+    return result.rowcount
 
 
 

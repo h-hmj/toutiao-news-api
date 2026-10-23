@@ -21,11 +21,9 @@ async def register(user_data: UserRequest ,db: AsyncSession = Depends(get_db)): 
     #验证用户是否存在
     existing_user = await users.get_user_by_username(db, user_data.username)
     if existing_user:
-        return {
-            "code": 400,
-            "message": "用户已存在，请修改用户名后重试",
-            "data": None
-        }
+        # 统一走全局异常处理器：HTTP 状态码与 body code 保持一致（400），
+        # 而不是"HTTP 200 里藏 code 400"
+        raise HTTPException(status_code=400, detail="用户已存在，请修改用户名后重试")
 
     #用户不存在则创建用户
     user = await users.create_user(db, user_data)

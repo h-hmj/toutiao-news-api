@@ -4,16 +4,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from utils.exception_handlers import register_exception_handlers
 from routers import favorite
 from routers import history
+import logging
+import os
+
+# 统一日志配置（替代散落的 print，生产可接入日志采集）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+
 app = FastAPI()
 
 
 # 注册异常处理器
 register_exception_handlers(app)
 
+# 允许的源通过环境变量配置（逗号分隔），生产环境设置 ALLOWED_ORIGINS="https://your-domain"
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
+# 规范禁止 allow_origins=["*"] 与 allow_credentials=True 组合：全开时自动关闭凭证携带
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   #允许的源，开发阶段允许所有源，生产环境需要指定源
-    allow_credentials=True,   #允许携带cookie
+    allow_origins=ALLOWED_ORIGINS,   #允许的源
+    allow_credentials=ALLOWED_ORIGINS != ["*"],   #允许携带cookie（仅在指定了具体源时开启）
     allow_methods=["*"],   #允许的请求方法
     allow_headers=["*"],   #允许的请求头
 )

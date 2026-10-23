@@ -101,13 +101,16 @@ CREATE DATABASE IF NOT EXISTS news_app
   DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
 
-连接信息在 [config/db_conf.py](config/db_conf.py) 中硬编码：
+连接信息在 [config/db_conf.py](config/db_conf.py) 中通过环境变量读取（默认值仅用于本地开发）：
 
 ```text
-mysql+asyncmy://root:123456@localhost:3306/news_app
+DB_USER / DB_PASSWORD / DB_HOST / DB_PORT / DB_NAME
+SQL_ECHO=true 时输出 SQL 日志（默认关闭）
+DEBUG_MODE=false 时关闭异常堆栈回显（默认开启，便于学习调试）
+ALLOWED_ORIGINS=https://your-domain 配置跨域白名单（默认 *）
 ```
 
-> 修改账号 / 密码 / 库名请直接编辑该文件。
+> 本地开发若不设置环境变量，默认连接 `root:123456@localhost:3306/news_app`。
 
 ### 3. 启动 Redis
 
@@ -135,7 +138,7 @@ uvicorn main:app --reload
 | `user` | User | id, username(唯一), password(bcrypt), nickname, avatar, gender(enum: male/female/unknown), bio, phone(唯一) | 用户表 |
 | `user_token` | UserToken | id, user_id(FK), token(唯一), expires_at | 登录令牌，一用户一条，重复登录刷新 |
 | `favorite` | Favorite | id, user_id(FK), news_id(FK), created_at | 联合唯一约束 `(user_id, news_id)`，防重复收藏 |
-| `history` | History | id, user_id(FK), news_id(FK), view_time | 同一用户同一新闻只保留一条，重复浏览更新时间 |
+| `history` | History | id, user_id(FK), news_id(FK), view_time | 联合唯一约束 `(user_id, news_id)`；重复浏览用 `INSERT ... ON DUPLICATE KEY UPDATE` 更新时间 |
 
 ## API 接口文档
 
@@ -254,35 +257,56 @@ Token 方案为**数据库存储型**（非 JWT），流程如下：
 | `news:detail:{newsId}` | 新闻详情 | 300s |
 | `news:related:{newsId}:{categoryId}` | 相关新闻 | 1800s |
 
-不同 key 使用不同 TTL，也避免了同时过期引发缓存雪崩。
+不同 key 使用不同 TTL，也避免了同时过期引发缓存雪崩。此外已补齐三类缓存防护：
+
+- **缓存失效**：浏览量自增后主动删除 `news:detail:{id}`，下次读取回源拿到最新值
+- **缓存穿透**：查询不存在的新闻时写入 60s 空值标记（`{"_null": true}`），阻止恶意请求反复打到 MySQL
+- **缓存击穿**：热点 key 重建时用 Redis `SETNX` 互斥锁，同一时刻只放一个请求回源，其余请求短暂等待后重试缓存
 
 ## 统一响应与异常处理
 
 - 成功响应统一走 [utils/response.py](utils/response.py) 的 `success_response()`，内部用 `jsonable_encoder` 兼容 Pydantic / ORM 对象
-- [utils/exception_handlers.py](utils/exception_handlers.py) 注册 4 级全局异常处理：
+- [utils/exception_handlers.py](utils/exception_handlers.py) 注册 5 级全局异常处理：
 
 | 异常类型 | HTTP 状态码 | 返回 message |
 |---|---|---|
 | `HTTPException` | 原状态码 | 业务错误详情 |
-| `IntegrityError` | 400 | 用户名已存在 / 关联数据不存在等 |
+| `IntegrityError` | 400 | 按约束名细分：用户名已存在 / 手机号已被使用 / 已收藏过该新闻 / 关联数据不存在等 |
+| `RequestValidationError` | 422 | 请求参数校验失败（同样走 `{code, message, data}` 统一格式） |
 | `SQLAlchemyError` | 500 | 数据库操作失败，请稍后重试 |
 | `Exception` | 500 | 服务器内部错误 |
 
-`utils/exception.py` 中 `DEBUG_MODE = True` 时，500 类错误的 `data` 会附带异常类型、详情与 traceback（教学用途，生产应关闭）。
+环境变量 `DEBUG_MODE=true`（默认）时，400/500 类错误的 `data` 会附带异常类型、详情与 traceback（教学用途，生产环境务必设为 `false`）。
 
-## 已知问题与开发注意事项
+## 已知问题修复记录
 
-以下为当前代码中已确认的问题，后续迭代建议修复：
+以下问题已在本次迭代中全部修复：
 
-1. **多余的误导入**：[crud/favorite.py](crud/favorite.py) 首行 `from dns.e164 import query` 是编辑器自动导入产物，导致项目隐式依赖 `dnspython`，应删除
-2. **三套 `Base` 未统一**：`models/news.py`、`models/users.py`、`models/favorite.py` 各自定义了 `DeclarativeBase`，无法用一条 `Base.metadata.create_all()` 建全所有表；目前依赖手工建表，建议统一 Base 并引入 Alembic 迁移
-3. **`datetime.now()` 写成了立即调用**：[models/users.py](models/users.py) 中 `User.created_at/updated_at` 的 `default=datetime.now()`（带括号）在模块导入时求值一次，所有新行会共用同一时间戳，应改为 `default=datetime.now`（不带括号）
-4. **清空接口消息错误**：`remove_all_favorites` / `delete_all_history` 返回 `bool`，但路由消息写成 `f"清空了{result}条记录"`，实际会显示"清空了True条记录"，应返回 `rowcount`
-5. **详情浏览量有两处滞后**：详情接口返回的 `views` 是本次 +1 前的旧值（UPDATE 后未 `refresh`）；且详情缓存 300s，缓存期间 `views` 不更新
-6. **响应字段命名不统一**：`categories` / `list` 返回 snake_case（ORM 直出），`detail` / 收藏 / 历史返回 camelCase，前端需两套约定；建议统一经 `schemas/` 输出
-7. **配置硬编码**：数据库密码、Redis 地址直接写死在 `config/`，建议迁移到 `.env` + `pydantic-settings`
-8. **CORS 全开**：`allow_origins=["*"]` 与 `allow_credentials=True` 组合仅适用于开发环境
-9. **token 过期只校验不删除**：过期令牌仍留在 `user_token` 表，长期运行建议定期清理
+1. **误导入已删除**：`crud/favorite.py` 的 `from dns.e164 import query` 已移除，不再隐式依赖 `dnspython`
+2. **Base 已统一**：全项目共用 [models/base.py](models/base.py) 的 `Base`，可用 `Base.metadata.create_all()` 一键建表；时间戳列改为 `TimestampMixin` 按需复用
+3. **`datetime.now()` 括号 bug 已修**：`models/users.py` 中所有 `default=datetime.now()` 改为函数引用 `default=datetime.now`
+4. **清空接口消息已修**：`remove_all_favorites` / `delete_all_history` 返回 `rowcount`，消息正确显示"清空了N条记录"
+5. **浏览量旧值已修**：详情接口在 UPDATE 后回读最新 `views`；同时详情缓存主动失效，不再返回 300s 内的旧值
+6. **命名已统一**：`NewsItemBase.publish_time` 别名由 `publishedTime` 改为 `publishTime`，与详情接口一致；新闻路由全部改走 `success_response()`
+7. **配置已环境变量化**：MySQL / Redis / DEBUG_MODE / SQL_ECHO / CORS 白名单均可用环境变量覆盖，代码内仅保留本地开发默认值
+8. **CORS 已合规**：`allow_origins=["*"]` 时自动关闭 `allow_credentials`，符合浏览器规范；生产设置 `ALLOWED_ORIGINS` 指定具体源
+9. **过期 token 自动清理**：`get_user_by_token` 校验发现过期时直接删除该记录
+10. **IntegrityError 按约束名细分**：重复收藏返回"已收藏过该新闻"，不再误报"用户名已存在"
+11. **history 并发重复已修**：表加联合唯一约束，upsert 改用 MySQL 原生 `INSERT ... ON DUPLICATE KEY UPDATE`
+12. **422 校验错误已纳入统一格式**：新增 `RequestValidationError` 全局处理器
+13. **注册重名返回真 400**：不再出现"HTTP 200 里藏 code 400"
+14. **双重 commit 已消除**：crud 层只做 `flush()`（约束冲突立即暴露），事务提交统一由 `get_db` 完成
+15. **时区已统一**：`Favorite.created_at` 由 `datetime.utcnow` 改为 `datetime.now`
+16. **日志已规范**：`cache_conf.py` 的 print 全部替换为 `logging`，`main.py` 统一配置日志格式
+
+> **注意**：`history` 表新增了联合唯一约束，已存在的数据库需手工执行一次迁移：
+>
+> ```sql
+> -- 若已有重复数据，先保留每组最新一条再建约束
+> DELETE h FROM history h
+> JOIN history h2 ON h.user_id = h2.user_id AND h.news_id = h2.news_id AND h.id < h2.id;
+> ALTER TABLE history ADD CONSTRAINT user_news_history_unique UNIQUE (user_id, news_id);
+> ```
 
 ## 后续规划（参考）
 

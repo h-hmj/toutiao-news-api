@@ -1,6 +1,7 @@
 from models.history import History
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, delete
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from datetime import datetime
 
 from models.news import News
@@ -12,26 +13,23 @@ async def add_history(db: AsyncSession,
                       news_id: int,
                       ):
     """
-    添加历史记录，如果已存在则更新浏览时间，如果不存在则插入新记录
+    添加历史记录，如果已存在则更新浏览时间，如果不存在则插入新记录。
+    使用 MySQL 原生的 INSERT ... ON DUPLICATE KEY UPDATE 单语句完成 upsert，
+    配合表上的唯一约束 user_news_history_unique，并发下也不会插入重复记录
+    （旧写法"先查再插"存在竞态窗口）。
     """
+    stmt = mysql_insert(History).values(
+        user_id=user_id,
+        news_id=news_id,
+        view_time=datetime.now(),
+    )
+    stmt = stmt.on_duplicate_key_update(view_time=stmt.inserted.view_time)
+    await db.execute(stmt)
+
+    # UPDATE 语句不返回数据行，回读一次拿到最新记录返回
     query = select(History).where(History.user_id == user_id, History.news_id == news_id)
     result = await db.execute(query)
-    existing_history = result.scalar_one_or_none()
-    #检查result是否存在
-    if existing_history:
-        #更新浏览时间
-        existing_history.view_time = datetime.now()
-        await db.commit()
-        await db.refresh(existing_history)
-        return existing_history
-
-    else:
-        #插入新记录
-        history = History(user_id=user_id, news_id=news_id)
-        db.add(history)
-        await db.commit()
-        await db.refresh(history)
-        return history
+    return result.scalar_one_or_none()
 
 
 #获取浏览记录历史列表
@@ -65,7 +63,6 @@ async def delete_history(
     ):
     query = delete(History).where(History.user_id == user_id, History.news_id == news_id)
     result = await db.execute(query)
-    await db.commit()
     # 若返回true则代表删除成功，若为false则代表删除失败
     return result.rowcount > 0
 
@@ -77,7 +74,6 @@ async def delete_all_history(
     ):
     query = delete(History).where(History.user_id == user_id)
     result = await db.execute(query)
-    await db.commit()
-    # 若返回true则代表删除成功，若为false则代表删除失败
-    return result.rowcount > 0
+    # 返回删除的行数（而不是 bool，供路由拼接"清空了N条记录"消息）
+    return result.rowcount
 

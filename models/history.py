@@ -1,11 +1,11 @@
 from datetime import datetime
 
-from sqlalchemy import Integer, DateTime, ForeignKey, Index
+from sqlalchemy import Integer, DateTime, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from models.base import Base
 from models.users import User
 from models.news import News
-from models.favorite import Base
 
 
 class History(Base):
@@ -15,7 +15,9 @@ class History(Base):
     __tablename__ = 'history'
 
     # 创建索引
+    # UniqueConstraint：同一用户同一新闻只保留一条记录，配合 upsert 语句从数据库层杜绝并发重复插入
     __table_args__ = (
+        UniqueConstraint('user_id', 'news_id', name='user_news_history_unique'),
         Index('fk_history_user_idx', 'user_id'),
         Index('fk_history_news_idx', 'news_id'),
         Index('idx_view_time', 'view_time'),

@@ -1,7 +1,7 @@
 # 新闻相关的缓存方法：新闻分类的读取和写入
 # key - value
 from typing import List, Dict, Any, Optional
-from config.cache_conf import get_json_cache, set_cache
+from config.cache_conf import get_json_cache, set_cache, delete_cache
 
 CATEGORIES_KEY = "news:categories"
 NEWS_LIST_PREFIX = "news_list:"
@@ -46,6 +46,12 @@ async def get_cached_news_detail(news_id: int) -> Optional[Dict[str, Any]]:
 async def cache_news_detail(news_id: int, news_data: Dict[str, Any], expire: int = 300) -> bool:
     key = f"{NEWS_DETAIL_PREFIX}{news_id}"
     return await set_cache(key, news_data, expire)
+
+
+# 删除缓存-新闻详情（浏览量等数据变更后主动失效，保证下次读取回源拿到最新值）
+async def invalidate_news_detail(news_id: int) -> bool:
+    key = f"{NEWS_DETAIL_PREFIX}{news_id}"
+    return await delete_cache(key)
 
 
 # 写入缓存-相关新闻 key = news:related:新闻id:分类id + 相关新闻列表 + 过期时间

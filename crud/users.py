@@ -3,12 +3,10 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from models.users import User
+from models.users import User, UserToken
 from schemas.users import UserRequest, UserUpdateRequest
 from utils import security
 from datetime import datetime, timedelta
-from models.users import UserToken
-from models.users import User
 
 
 
@@ -26,7 +24,9 @@ async def create_user(db: AsyncSession, user_data:UserRequest):
     hashed_password = security.get_hash_password(user_data.password)
     user = User(username=user_data.username, password=hashed_password)
     db.add(user)
-    await db.commit()
+    # flush：把 SQL 发送到数据库执行（唯一约束冲突等错误会在这里立即抛出），
+    # 但不提交事务——事务边界统一由 get_db 依赖在请求结束后 commit
+    await db.flush()
     await db.refresh(user)    #从数据库读取最新的user
     return user
 
@@ -49,7 +49,7 @@ async def create_token(db: AsyncSession, user_id: int):
         #添加token
         user_token = UserToken(user_id=user_id, token=token, expires_at=expires_at)
         db.add(user_token)
-    await db.commit()
+    await db.flush()
     await db.refresh(user_token)
     return token
 
@@ -69,7 +69,12 @@ async def get_user_by_token(db: AsyncSession, token: str):
     query = select(UserToken).where(UserToken.token == token)
     result = await db.execute(query)
     db_token = result.scalars().one_or_none()
-    if not db_token or datetime.now() > db_token.expires_at:
+    if not db_token:
+        return None
+    if datetime.now() > db_token.expires_at:
+        # 过期令牌：顺手从库里删除，避免 user_token 表残留无效记录，再要求重新登录
+        await db.delete(db_token)
+        await db.flush()
         return None
     #根据token查用户
     query = select(User).where(User.id == db_token.user_id)
@@ -81,7 +86,6 @@ async def update_user(db: AsyncSession, username: str, user_data: UserUpdateRequ
 #user_data.model_dump(exclude_unset=True) = 把更新对象转成字典，且只包含前端真正传过来的字段，UPDATE 语句不会返回任何数据行
     query = update(User).where(User.username == username).values(user_data.model_dump(exclude_unset=True))
     result = await db.execute(query)
-    await db.commit()
 
     #检查更新
     if result.rowcount == 0:
@@ -101,8 +105,8 @@ async def change_password(db: AsyncSession, user:User, old_password: str, new_pa
     #新密码加密
     hashed_new_pwd = security.get_hash_password(new_password)
     user.password = hashed_new_pwd
-    db.add(user)  #把改过密码的 user 交给会话、准备 commit 落库
-    await db.commit()
+    db.add(user)  #把改过密码的 user 交给会话，flush 发送 SQL、commit 由 get_db 统一完成
+    await db.flush()
     await db.refresh(user)
     return {"message": "修改密码成功"}
 

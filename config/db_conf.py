@@ -1,10 +1,22 @@
+import os
+
 from sqlalchemy.ext.asyncio import create_async_engine,async_sessionmaker,AsyncSession
 
 #1.创建异步引擎
-ASYNC_DATABASE_URL = "mysql+asyncmy://root:123456@localhost:3306/news_app?charset=utf8mb4"
+# 连接信息通过环境变量注入，默认值仅用于本地开发；生产环境务必设置环境变量
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "123456")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "3306")
+DB_NAME = os.getenv("DB_NAME", "news_app")
+ASYNC_DATABASE_URL = (
+    f"mysql+asyncmy://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
+)
+# SQL 日志由环境变量 SQL_ECHO 控制，默认关闭，避免生产环境性能损耗
+SQL_ECHO = os.getenv("SQL_ECHO", "false").lower() == "true"
 async_engine = create_async_engine(
     ASYNC_DATABASE_URL,
-    echo=True,  # 是否开启sql日志
+    echo=SQL_ECHO,  # 是否开启sql日志
     pool_size = 10, #设置连接
 )
 

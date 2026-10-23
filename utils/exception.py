@@ -1,12 +1,16 @@
+import os
 import traceback
+
 from fastapi import HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette import status
 
 # 开发模式：返回详细错误信息
-# 生产模式：返回简化错误信息
-DEBUG_MODE = True  # 教学项目保持开启
+# 生产模式：返回简化错误信息（通过环境变量 DEBUG_MODE=false 关闭，避免泄露堆栈）
+DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
 
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -30,11 +34,19 @@ async def integrity_error_handler(request: Request, exc: IntegrityError):
     """
     error_msg = str(exc.orig)
 
-    # 判断具体的约束错误类型
-    if "username_UNIQUE" in error_msg or "Duplicate entry" in error_msg:
+    # 按具体约束名判断错误类型，避免所有 Duplicate entry 都被误报为"用户名已存在"
+    if "username_UNIQUE" in error_msg:
         detail = "用户名已存在"
+    elif "phone_UNIQUE" in error_msg:
+        detail = "手机号已被使用"
+    elif "user_news_unique" in error_msg:
+        detail = "已收藏过该新闻"
+    elif "user_news_history_unique" in error_msg:
+        detail = "该新闻已有浏览记录"
     elif "FOREIGN KEY" in error_msg:
         detail = "关联数据不存在"
+    elif "Duplicate entry" in error_msg:
+        detail = "数据重复，违反唯一约束"
     else:
         detail = "数据约束冲突，请检查输入"
 
@@ -103,6 +115,21 @@ async def general_exception_handler(request: Request, exc: Exception):
             "code": 500,
             "message": "服务器内部错误",
             "data": error_data
+        }
+    )
+
+
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    处理请求参数校验失败（Pydantic 校验不通过），
+    补齐统一响应格式，避免 FastAPI 默认的 {"detail": [...]} 破坏前端契约
+    """
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "code": 422,
+            "message": "请求参数校验失败",
+            "data": {"errors": jsonable_encoder(exc.errors())}
         }
     )
 

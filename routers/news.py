@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, Query
-from crud import news
 from config.db_conf import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from crud import news_cache
+from utils.response import success_response
 
 #创建 APIRouter 实例
 router = APIRouter(prefix="/news", tags=["news"])
@@ -20,11 +20,7 @@ router = APIRouter(prefix="/news", tags=["news"])
 async def get_categories(skip: int = 0, limit: int = 10, db: AsyncSession = Depends(get_db)):
     #先获取数据库里面的新闻分类数据——>先定义模型类——>封装查询的数据方法
     categories = await news_cache.get_categories(db, skip, limit)
-    return {
-        "code": 200,
-        "message": "获取分类成功",
-        "data": categories
-    }
+    return success_response(message="获取分类成功", data=categories)
 
 #获取新闻列表
 @router.get("/list")
@@ -41,15 +37,11 @@ async def get_news_list(
 
     #查看是否还有更多
     has_more = total > offset + len(news_list)
-    return {
-        "code": 200,
-        "message": "获取新闻列表成功",
-        "data":{
-            "list": news_list,
-            "total": total,
-            "hasMore": has_more
-          }
-     }
+    return success_response(message="获取新闻列表成功", data={
+        "list": news_list,
+        "total": total,
+        "hasMore": has_more
+    })
 
 #获取新闻具体详情
 @router.get("/detail")
@@ -65,22 +57,20 @@ async def get_news_detail(news_id: int= Query(...,alias="id"), db: AsyncSession 
     if not views_res:
         raise HTTPException(status_code=404, detail="新闻不存在")
 
+    #3.回读自增后的最新浏览量（详情对象是自增前查询的，直接用会返回旧值）
+    current_views = await news_cache.get_news_views(db, news_detail.id)
 
-    #3.查询相关新闻
+    #4.查询相关新闻
     related_news = await news_cache.get_related_news(db, news_detail.category_id, news_detail.id)
 
-    return{
-        "code": 200,
-        "message": "success",
-        "data": {
-            "id": news_detail.id,
-            "title": news_detail.title,
-            "content": news_detail.content,
-            "image": news_detail.image,
-            "author": news_detail.author,
-            "publishTime": news_detail.publish_time,
-            "categoryId": news_detail.category_id,
-            "views": news_detail.views,
-            "relatedNews": related_news
-       }
-    }
+    return success_response(message="success", data={
+        "id": news_detail.id,
+        "title": news_detail.title,
+        "content": news_detail.content,
+        "image": news_detail.image,
+        "author": news_detail.author,
+        "publishTime": news_detail.publish_time,
+        "categoryId": news_detail.category_id,
+        "views": current_views,
+        "relatedNews": related_news
+    })
